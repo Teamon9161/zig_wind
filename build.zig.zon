@@ -1,0 +1,7 @@
+.{
+    .name = .zig_wind,
+    .version = "0.1.0",
+    .minimum_zig_version = "0.16.0",
+    .paths = .{""},
+    .fingerprint = 0xe961b71d7c8d9f47,
+}
