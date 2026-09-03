@@ -1,12 +1,14 @@
 const std = @import("std");
 const wind = @import("zig_wind");
 
-extern "kernel32" fn Sleep(milliseconds: u32) callconv(.winapi) void;
-
 pub fn main() !void {
     var gpa = std.heap.DebugAllocator(.{}){};
     defer std.debug.assert(gpa.deinit() == .ok);
     const allocator = gpa.allocator();
+
+    var threaded: std.Io.Threaded = .init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
 
     var api = try wind.Wind.init();
     defer api.deinit();
@@ -24,7 +26,7 @@ pub fn main() !void {
     defer subscription.deinit();
     std.debug.print("WSQ request ID: {d}\n", .{subscription.request_id});
 
-    // COM callbacks are delivered while the same STA thread pumps messages in poll().
+    // Wind pushes arrive on its own thread; poll() hands them over on this one.
     var attempt: usize = 0;
     while (attempt < 200) : (attempt += 1) {
         if (try api.poll(allocator)) |event_value| {
@@ -37,7 +39,7 @@ pub fn main() !void {
             }
             return;
         }
-        Sleep(50);
+        try io.sleep(.fromMilliseconds(50), .awake);
     }
 
     std.debug.print("No WSQ update arrived within 10 seconds. Keep polling in a long-lived application.\n", .{});

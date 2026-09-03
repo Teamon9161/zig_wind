@@ -8,12 +8,10 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/wind.zig"),
         .target = target,
         .optimize = optimize,
+        // Windows compiles the COM helper; Linux needs libc for dlopen.
         .link_libc = true,
     });
-    wind_module.addIncludePath(b.path("src"));
-    wind_module.addCSourceFile(.{ .file = b.path("src/wind_com_helpers.c") });
-    wind_module.linkSystemLibrary("ole32", .{});
-    wind_module.linkSystemLibrary("oleaut32", .{});
+    addBackend(b, wind_module, target);
 
     const wsd_example = b.addExecutable(.{
         .name = "wind-wsd",
@@ -27,8 +25,7 @@ pub fn build(b: *std.Build) void {
     b.installArtifact(wsq_example);
 
     const unit_tests = b.addTest(.{ .root_module = wind_module });
-    unit_tests.root_module.linkSystemLibrary("ole32", .{});
-    unit_tests.root_module.linkSystemLibrary("oleaut32", .{});
+    linkBackendLibraries(unit_tests.root_module, target);
     const run_tests = b.addRunArtifact(unit_tests);
 
     const test_step = b.step("test", "Run unit tests");
@@ -45,6 +42,21 @@ pub fn build(b: *std.Build) void {
     run_wsq_step.dependOn(&run_wsq.step);
 }
 
+/// The Linux backend loads Wind's shared objects with dlopen, so it links nothing
+/// at build time. Only the COM path needs the C shim and the OLE libraries.
+fn addBackend(b: *std.Build, module: *std.Build.Module, target: std.Build.ResolvedTarget) void {
+    if (target.result.os.tag != .windows) return;
+    module.addIncludePath(b.path("src"));
+    module.addCSourceFile(.{ .file = b.path("src/wind_com_helpers.c") });
+    linkBackendLibraries(module, target);
+}
+
+fn linkBackendLibraries(module: *std.Build.Module, target: std.Build.ResolvedTarget) void {
+    if (target.result.os.tag != .windows) return;
+    module.linkSystemLibrary("ole32", .{});
+    module.linkSystemLibrary("oleaut32", .{});
+}
+
 fn exampleModule(
     b: *std.Build,
     target: std.Build.ResolvedTarget,
@@ -59,8 +71,6 @@ fn exampleModule(
         .link_libc = true,
     });
     module.addImport("zig_wind", wind_module);
-    module.addIncludePath(b.path("src"));
-    module.linkSystemLibrary("ole32", .{});
-    module.linkSystemLibrary("oleaut32", .{});
+    linkBackendLibraries(module, target);
     return module;
 }
