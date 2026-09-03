@@ -32,7 +32,7 @@ void wind_variant_set_ui8(VARIANT *variant, ULONGLONG value);
 void wind_variant_set_variant_ref(VARIANT *variant, VARIANT *value);
 void wind_variant_set_i4_ref(VARIANT *variant, LONG *value);
 LONG wind_variant_array_count(const VARIANT *variant);
-HRESULT wind_variant_array_element(const VARIANT *array_variant, LONG index, VARIANT *out);
+PVOID wind_variant_array_data(const VARIANT *variant);
 VARTYPE wind_variant_type(const VARIANT *variant);
 BSTR wind_variant_bstr(const VARIANT *variant);
 LONG wind_variant_i4(const VARIANT *variant);

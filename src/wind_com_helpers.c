@@ -166,29 +166,21 @@ LONG wind_variant_array_count(const VARIANT *variant) {
     return wind_safearray_len(V_ARRAY(variant));
 }
 
-HRESULT wind_variant_array_element(const VARIANT *array_variant, LONG index, VARIANT *out) {
-    SAFEARRAY *array = V_ARRAY(array_variant);
-    VARTYPE type = V_VT(array_variant) & VT_TYPEMASK;
-    LONG lower = 0;
+/// Raw pointer to the array's data block.
+///
+/// Wind's results are multi-dimensional (time x code x field), and
+/// SafeArrayGetElement wants one index per dimension — handing it a single LONG
+/// reads past the caller's index array and returns the wrong element. Wind's own
+/// WAPIWrapperCpp does not use it either: WindDataParser::GetVarFromArray walks
+/// pvData with a flat index, exactly like the Linux backend does. Same layout,
+/// one code path, no per-element COM call.
+PVOID wind_variant_array_data(const VARIANT *variant) {
+    SAFEARRAY *array;
 
-    VariantInit(out);
-    if (array == NULL || FAILED(SafeArrayGetLBound(array, 1, &lower))) return E_INVALIDARG;
-    index += lower;
-    V_VT(out) = type;
-
-    switch (type) {
-    case VT_VARIANT: return SafeArrayGetElement(array, &index, out);
-    case VT_BSTR: return SafeArrayGetElement(array, &index, &V_BSTR(out));
-    case VT_I4: return SafeArrayGetElement(array, &index, &V_I4(out));
-    case VT_I8: return SafeArrayGetElement(array, &index, &V_I8(out));
-    case VT_R8: return SafeArrayGetElement(array, &index, &V_R8(out));
-    case VT_R4: return SafeArrayGetElement(array, &index, &V_R4(out));
-    case VT_BOOL: return SafeArrayGetElement(array, &index, &V_BOOL(out));
-    case VT_DATE: return SafeArrayGetElement(array, &index, &V_DATE(out));
-    default:
-        VariantClear(out);
-        return DISP_E_TYPEMISMATCH;
-    }
+    if (!(V_VT(variant) & VT_ARRAY)) return NULL;
+    array = V_ARRAY(variant);
+    if (array == NULL) return NULL;
+    return array->pvData;
 }
 
 VARTYPE wind_variant_type(const VARIANT *variant) { return V_VT(variant); }

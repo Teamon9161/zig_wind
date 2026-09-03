@@ -46,12 +46,14 @@ const win = struct {
 
     const VT_EMPTY: VARTYPE = 0;
     const VT_NULL: VARTYPE = 1;
+    const VT_I2: VARTYPE = 2;
     const VT_I4: VARTYPE = 3;
     const VT_R4: VARTYPE = 4;
     const VT_R8: VARTYPE = 5;
     const VT_DATE: VARTYPE = 7;
     const VT_BSTR: VARTYPE = 8;
     const VT_BOOL: VARTYPE = 11;
+    const VT_VARIANT: VARTYPE = 12;
     const VT_I8: VARTYPE = 20;
     const VT_UI8: VARTYPE = 21;
     const VT_TYPEMASK: VARTYPE = 0x0fff;
@@ -75,7 +77,7 @@ const helpers = struct {
     extern fn wind_variant_set_variant_ref(variant: *win.VARIANT, value: *win.VARIANT) void;
     extern fn wind_variant_set_i4_ref(variant: *win.VARIANT, value: *win.LONG) void;
     extern fn wind_variant_array_count(variant: *const win.VARIANT) win.LONG;
-    extern fn wind_variant_array_element(array_variant: *const win.VARIANT, index: win.LONG, out: *win.VARIANT) win.HRESULT;
+    extern fn wind_variant_array_data(variant: *const win.VARIANT) ?*anyopaque;
     extern fn wind_variant_type(variant: *const win.VARIANT) win.VARTYPE;
     extern fn wind_variant_bstr(variant: *const win.VARIANT) win.BSTR;
     extern fn wind_variant_i4(variant: *const win.VARIANT) win.LONG;
@@ -384,6 +386,9 @@ pub const Wind = struct {
         defer std.heap.page_allocator.free(args);
         for (args) |*arg| helpers.wind_variant_init(arg);
         args[0] = error_ref;
+        // args[0] is a copy of error_ref and is cleared with it; the rest own
+        // BSTRs allocated right here.
+        defer for (args[1..]) |*arg| clearVariant(arg);
         for (inputs, 0..) |input, index| try setStringVariant(&args[inputs.len - index], input);
 
         var result: win.VARIANT = undefined;
@@ -555,59 +560,99 @@ fn copyData(allocator: std.mem.Allocator, error_code: win.LONG, codes: *const wi
     return result;
 }
 
+/// Start of the array's data block.
+///
+/// Elements are read straight out of it with a flat index, the way Wind's own
+/// WAPIWrapperCpp reads them. Results are `time x code x field`, so a
+/// SafeArrayGetElement call taking one index per dimension would need an index
+/// array, not a single LONG. Nothing here may assume the block is aligned, so
+/// every load goes through `align(1)`.
+fn arrayData(source: *const win.VARIANT) Error![*]align(1) const u8 {
+    const data = helpers.wind_variant_array_data(source) orelse return error.UnexpectedVariant;
+    return @ptrCast(data);
+}
+
+fn itemAt(comptime Item: type, data: [*]align(1) const u8, index: usize) Item {
+    const items: [*]align(1) const Item = @ptrCast(data);
+    return items[index];
+}
+
 fn copyStringArray(allocator: std.mem.Allocator, source: *const win.VARIANT) Error![][]u8 {
     const count: usize = @intCast(helpers.wind_variant_array_count(source));
+    if (count == 0) return allocator.alloc([]u8, 0);
+    if ((helpers.wind_variant_type(source) & win.VT_TYPEMASK) != win.VT_BSTR) return error.UnexpectedVariant;
+    const data = try arrayData(source);
+
     const result = try allocator.alloc([]u8, count);
-    errdefer freeStrings(allocator, result);
+    var filled: usize = 0;
+    errdefer {
+        for (result[0..filled]) |text| allocator.free(text);
+        allocator.free(result);
+    }
     for (result, 0..) |*destination, index| {
-        var item: win.VARIANT = undefined;
-        helpers.wind_variant_init(&item);
-        defer clearVariant(&item);
-        if (helpers.wind_variant_array_element(source, @intCast(index), &item) < 0) return error.UnexpectedVariant;
-        if ((helpers.wind_variant_type(&item) & win.VT_TYPEMASK) != win.VT_BSTR) return error.UnexpectedVariant;
-        destination.* = try bstrToUtf8(allocator, helpers.wind_variant_bstr(&item));
+        // The BSTRs belong to the SAFEARRAY; copy out, never free.
+        destination.* = try bstrToUtf8(allocator, itemAt(win.BSTR, data, index));
+        filled += 1;
     }
     return result;
 }
 
 fn copyNumberArray(allocator: std.mem.Allocator, source: *const win.VARIANT) Error![]f64 {
     const count: usize = @intCast(helpers.wind_variant_array_count(source));
+    if (count == 0) return allocator.alloc(f64, 0);
+    const base = helpers.wind_variant_type(source) & win.VT_TYPEMASK;
+    if (base != win.VT_DATE and base != win.VT_R8) return error.UnexpectedVariant;
+    const data = try arrayData(source);
+
     const result = try allocator.alloc(f64, count);
-    errdefer allocator.free(result);
-    for (result, 0..) |*destination, index| {
-        var item: win.VARIANT = undefined;
-        helpers.wind_variant_init(&item);
-        defer clearVariant(&item);
-        if (helpers.wind_variant_array_element(source, @intCast(index), &item) < 0) return error.UnexpectedVariant;
-        destination.* = windDateSerialToOleDate(switch (helpers.wind_variant_type(&item) & win.VT_TYPEMASK) {
-            win.VT_DATE => helpers.wind_variant_date(&item),
-            win.VT_R8 => helpers.wind_variant_r8(&item),
-            else => return error.UnexpectedVariant,
-        });
-    }
+    for (result, 0..) |*destination, index| destination.* = windTimeToOleDate(itemAt(f64, data, index));
     return result;
 }
 
-fn windDateSerialToOleDate(serial: f64) f64 {
-    // Wind returns days since 0001-01-01; OLE Automation dates start at 1899-12-30.
+/// The COM time axis counts days from 0001-01-01; OLE Automation dates start at
+/// 1899-12-30. Wind's own wrapper applies exactly this shift, in exactly one
+/// place — `WindData::GetTimeByIndex` (WAPIWrapperCpp.cpp:58):
+///
+///     return (DATE) WindDataParser::GetDoubeItemByIndex(times, index) - 693960;
+///
+/// Note the asymmetry, which is Wind's, not ours: VT_DATE *cells* (what
+/// tdaysoffset returns, for instance) are already OLE dates and are read through
+/// GetVarFromArray with no shift, so `copyValue` must not touch them. The Linux
+/// C API is different again — its time axis is already OLE.
+fn windTimeToOleDate(serial: f64) f64 {
     return serial - 693_960.0;
 }
 
 fn copyValueArray(allocator: std.mem.Allocator, source: *const win.VARIANT) Error![]Value {
     const count: usize = @intCast(helpers.wind_variant_array_count(source));
-    var result = try allocator.alloc(Value, count);
-    var initialized: usize = 0;
+    if (count == 0) return allocator.alloc(Value, 0);
+    const data = try arrayData(source);
+    const base = helpers.wind_variant_type(source) & win.VT_TYPEMASK;
+
+    const result = try allocator.alloc(Value, count);
+    var filled: usize = 0;
     errdefer {
-        for (result[0..initialized]) |*value| value.deinit(allocator);
+        for (result[0..filled]) |*value| value.deinit(allocator);
         allocator.free(result);
     }
     for (result, 0..) |*destination, index| {
-        var item: win.VARIANT = undefined;
-        helpers.wind_variant_init(&item);
-        defer clearVariant(&item);
-        if (helpers.wind_variant_array_element(source, @intCast(index), &item) < 0) return error.UnexpectedVariant;
-        destination.* = try copyValue(allocator, &item);
-        initialized += 1;
+        destination.* = switch (base) {
+            win.VT_VARIANT => item: {
+                const items: [*]align(1) const win.VARIANT = @ptrCast(data);
+                const item: win.VARIANT = items[index];
+                break :item try copyValue(allocator, &item);
+            },
+            win.VT_BSTR => .{ .string = try bstrToUtf8(allocator, itemAt(win.BSTR, data, index)) },
+            win.VT_R8 => .{ .number = itemAt(f64, data, index) },
+            win.VT_R4 => .{ .float = itemAt(f32, data, index) },
+            win.VT_DATE => .{ .date = itemAt(f64, data, index) },
+            win.VT_I4 => .{ .integer = itemAt(i32, data, index) },
+            win.VT_I8 => .{ .integer64 = itemAt(i64, data, index) },
+            win.VT_I2 => .{ .integer = itemAt(i16, data, index) },
+            win.VT_BOOL => .{ .boolean = itemAt(win.VARIANT_BOOL, data, index) != 0 },
+            else => return error.UnexpectedVariant,
+        };
+        filled += 1;
     }
     return result;
 }

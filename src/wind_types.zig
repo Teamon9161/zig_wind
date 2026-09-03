@@ -72,6 +72,22 @@ pub const Data = struct {
         self.* = undefined;
     }
 
+    /// The reason Wind rejected a request.
+    ///
+    /// When `error_code` is non-zero Wind answers with the explanation as data —
+    /// `codes = {"ErrorReport"}`, `fields = {"OUTMESSAGE"}` — so the message is
+    /// the first non-empty string in `values`. Borrowed from this `Data`; it dies
+    /// with `deinit`.
+    pub fn errorMessage(self: *const Data) ?[]const u8 {
+        for (self.values) |value| {
+            switch (value) {
+                .string => |text| if (std.mem.trim(u8, text, " \t\r\n").len != 0) return text,
+                else => {},
+            }
+        }
+        return null;
+    }
+
     pub fn valueAt(self: *const Data, time_index: usize, code_index: usize, field_index: usize) Error!Value {
         const code_count = self.codes.len;
         const field_count = self.fields.len;
@@ -110,6 +126,27 @@ pub const SubscriptionEvent = struct {
 pub fn freeStrings(allocator: std.mem.Allocator, values: [][]u8) void {
     for (values) |value| allocator.free(value);
     allocator.free(values);
+}
+
+test "Data.errorMessage picks up Wind's explanation" {
+    const allocator = std.testing.allocator;
+    var data = Data{
+        .allocator = allocator,
+        .error_code = -40522018,
+        .codes = try allocator.dupe([]u8, &.{try allocator.dupe(u8, "ErrorReport")}),
+        .fields = try allocator.dupe([]u8, &.{try allocator.dupe(u8, "OUTMESSAGE")}),
+        .times = try allocator.dupe(f64, &.{45293.0}),
+        .values = try allocator.dupe(Value, &.{
+            .{ .string = try allocator.dupe(u8, "CWSDService: multi-codes with multi-indicators is not supported.") },
+        }),
+    };
+    defer data.deinit();
+
+    try std.testing.expect(std.mem.startsWith(u8, data.errorMessage().?, "CWSDService"));
+
+    var empty = Data.empty(allocator, 0);
+    defer empty.deinit();
+    try std.testing.expectEqual(@as(?[]const u8, null), empty.errorMessage());
 }
 
 test "Data.valueAt follows time-code-field layout" {

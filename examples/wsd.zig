@@ -9,7 +9,8 @@ pub fn main() !void {
     var api = try wind.Wind.init();
     defer api.deinit();
 
-    const start_code = try api.start(null, null, 5000);
+    // WindPy waits 120 s by default, and a cold terminal really can take that long.
+    const start_code = try api.start(null, null, 120_000);
     if (start_code != 0) {
         std.debug.print("Wind start failed: {d}\n", .{start_code});
         return;
@@ -27,7 +28,11 @@ pub fn main() !void {
     defer result.deinit();
 
     if (result.error_code != 0) {
-        std.debug.print("Wind API error: {d}\n", .{result.error_code});
+        // Wind returns the reason as data; errorMessage digs it out.
+        std.debug.print("Wind API error {d}: {s}\n", .{
+            result.error_code,
+            result.errorMessage() orelse "(no message)",
+        });
         return;
     }
 

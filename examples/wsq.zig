@@ -13,7 +13,7 @@ pub fn main() !void {
     var api = try wind.Wind.init();
     defer api.deinit();
 
-    if (try api.start(null, null, 5000) != 0) return error.WindStartFailed;
+    if (try api.start(null, null, 120_000) != 0) return error.WindStartFailed;
     defer _ = api.stop() catch {};
 
     const started = try api.subscribeWsq("000001.SZ", "rt_last", "");

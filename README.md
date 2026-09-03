@@ -110,6 +110,21 @@ while (true) {
 
 Wind 业务请求是否成功由 `Data.error_code` 或 `SubscriptionStart.error_code` 表示，`0` 为成功。传输层失败（COM 创建、方法解析、封送；Linux 下动态库缺失或符号缺失）作为 Zig `Error` 返回。
 
+出错时 Wind 会把原因当成数据返回（`codes = {"ErrorReport"}`、`fields = {"OUTMESSAGE"}`），`Data.errorMessage()` 直接把它取出来：
+
+```zig
+if (result.error_code != 0) {
+    std.debug.print("Wind API error {d}: {s}\n", .{
+        result.error_code,
+        result.errorMessage() orelse "(no message)",
+    });
+    return;
+}
+// Wind API error -40522018: CWSDService: multi-codes with multi-indicators is not supported.
+```
+
+返回的切片属于该 `Data`，随 `deinit` 一起失效。
+
 `Data.codes`、`Data.fields` 是 UTF-8 字符串数组；`Data.times` 保存 OLE Automation 日期（自 1899-12-30 起的天数，`f64`）；`Data.values` 按 `time × code × field` 排列。推荐使用：
 
 ```zig
@@ -140,6 +155,22 @@ const value = try data.valueAt(time_index, code_index, field_index);
 3. **不能假设 Wind 返回缓冲区的对齐**。`SafeArray.pvData` 指向的数组未必按元素自然对齐，所有读取都走 `align(1)`。
 
 `wsi` 和 `wst` 由 `libWind.Cosmos.QuantData.so` 提供，并且必须用它自己的 `free_data` 释放。
+
+### COM 后端读数组的方式
+
+数组元素直接按 `SAFEARRAY::pvData` 平铺下标取，`pos = 时间 × 代码数 × 字段数 + 代码 × 字段数 + 字段`，与 Linux 后端同一套布局 —— 这也是 Wind 随包 `WAPIWrapperCpp` 里 `WindDataParser::GetVarFromArray` 的做法。不用 `SafeArrayGetElement`：Wind 的结果是三维的，而它要求每个维度一个下标，传单个 `LONG` 会读越界并取错元素。数据块同样不保证对齐，所有读取走 `align(1)`。
+
+`times` 要减 693960 天：COM 的时间轴数的是自 0001-01-01 起的天数，OLE Automation 日期从 1899-12-30 起算。Wind 自己的 wrapper 就在 `WindData::GetTimeByIndex`（`WAPIWrapperCpp.cpp:58`）这一处做这个换算。
+
+注意这个不对称是 Wind 的：数据单元格里的 `VT_DATE`（比如 `tdaysoffset` 的返回值）本来就是 OLE 日期，wrapper 走 `GetVarFromArray` 读它时不减，所以 `copyValue` 不能碰它。Linux 的 C 接口又是另一回事，它的时间轴本来就是 OLE 日期。三处约定各不相同，都照 Wind 自己的来。
+
+### 使用上的两个坑
+
+- `wsd` 不支持“多代码 + 多字段”同时提取，会返回 `-40522018`
+  `CWSDService: multi-codes with multi-indicators is not supported.`。多代码时只取
+  一个字段，或多字段时只取一个代码 —— WindPy 走同一个接口，行为完全一样。
+- `start` 的 `timeout_ms` 别给太小。WindPy 默认等 120 秒，冷启动的终端确实可能要
+  这么久；等待期间失败会报 `-40520008`（超时），容易被误认成权限问题。
 
 ### 已知构建问题
 
